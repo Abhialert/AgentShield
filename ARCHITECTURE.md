@@ -1,28 +1,27 @@
 # 🏗️ AgentShield — Technical Architecture
 
-> A deep-dive into how AgentShield intercepts, evaluates, and controls AI agent actions.
+> Comprehensive architectural breakdown of AgentShield's zero-trust execution enforcement gateway, policy engine, and adversarial testing harness.
 
 ---
 
-## 1. Security Gateway Flow
+## 1. Zero-Trust Security Gateway Pipeline
 
-Every agent action passes through the following pipeline synchronously before any execution occurs:
+Every proposed action follows a strict **two-step cryptographic interception model**:
 
 ```
-Agent Request
+AI Agent (Proposed Action)
      │
-     │  POST /api/actions/authorize
-     │  Headers: Content-Type: application/json
-     │  Body: { "token": "<JWT>", "action_type": "...", "params": {...}, "context": "..." }
+     │  1. POST /api/gateway/authorize
+     │  Body: { token, action_type, params, context }
      ▼
 ┌────────────────────────────────────────────────────────────────┐
 │                     STAGE 1: JWT Verification                  │
 │  auth.py → verify_token(token)                                 │
 │                                                                │
-│  ✓ Decode JWT with HS256 (secret: agentshield-secret-2024)     │
-│  ✓ Check expiry (exp claim)                                    │
-│  ✓ Extract agent_id and permissions from payload               │
-│  ✗ Invalid/expired → immediate BLOCK, no further processing    │
+│  ✓ Decode JWT with HS256 using AGENTSHIELD_SECRET              │
+│  ✓ Check timestamp & expiry claim (24h default lifetime)       │
+│  ✓ Replay-safe JTI identifier tracking                         │
+│  ✗ Invalid / expired → immediate BLOCK (fail-closed)           │
 └──────────────────────────────┬─────────────────────────────────┘
                                │ agent_id confirmed
                                ▼
@@ -30,403 +29,166 @@ Agent Request
 │                   STAGE 2: Agent Status Check                  │
 │  DB lookup: agents WHERE id = agent_id                         │
 │                                                                │
-│  ✓ status == "active" → continue                               │
+│  ✓ status == "active" → proceed                                │
 │  ✗ status == "suspended" → BLOCK ("Agent suspended")           │
 │  ✗ status == "killed"    → BLOCK ("Agent killed")              │
 └──────────────────────────────┬─────────────────────────────────┘
-                               │ agent active
+                               │ agent is active
                                ▼
 ┌────────────────────────────────────────────────────────────────┐
-│                  STAGE 3: Policy Enforcement                   │
-│  security_engine.py → check_policy(agent, action_type, params) │
+│            STAGE 3: Deterministic Policy Enforcement           │
+│  security_engine.py → evaluate_policy()                        │
 │                                                                │
-│  ✓ action_type in agent.permissions_json.allowed_actions       │
-│  ✓ transfer_money: amount ≤ policy.max_amount                  │
-│  ✓ transfer_money: recipient in policy.approved_recipients     │
-│  ✓ file_access: path matches policy.allowed_file_paths         │
-│  ✓ email_delete: always flags for REVIEW (never hard-block)    │
-│  ✗ Any violation → BLOCK with reason                           │
+│  ✓ Check allowed action types against agent manifest           │
+│  ✓ Financial transfers:                                        │
+│      • recipient in approved_recipients (UNAPPROVED = HARD BLOCK)
+│      • amount ≤ max_amount (EXCEEDED = HARD BLOCK)             │
+│  ✓ File access:                                                │
+│      • Canonical path containment using pathlib.Path.resolve() │
+│      • Traversal sequences (../../) = HARD BLOCK               │
+│  ✗ Any deterministic policy violation → instant HARD BLOCK    │
 └──────────────────────────────┬─────────────────────────────────┘
-                               │ policy passed
+                               │ deterministic checks pass
                                ▼
 ┌────────────────────────────────────────────────────────────────┐
-│               STAGE 4: Anomaly Detection                       │
+│               STAGE 4: Sliding-Window Anomaly Check            │
 │  anomaly_detector.py → check_rate(agent_id, action_type)       │
 │                                                                │
-│  Counts actions in rolling 60-second window (rate_tracking DB) │
-│  > 10/min  → anomaly=True  (adds +30 to risk score)            │
-│  > 20/min  → critical: auto-suspend agent, BLOCK               │
+│  • Rolling 60-second window: count actions in rate_tracking    │
+│  • Rate > 10 req/min → anomaly flag set (+30 risk points)      │
+│  • Rate > 20 req/min → critical threshold: auto-suspend agent  │
 └──────────────────────────────┬─────────────────────────────────┘
-                               │ anomaly data collected
+                               │ anomaly metrics collected
                                ▼
 ┌────────────────────────────────────────────────────────────────┐
-│               STAGE 5: Prompt Injection Scan                   │
-│  Scan action_type, params, and context for patterns:           │
+│         STAGE 5: Multi-Layer Prompt Injection Scanner          │
+│  security_engine.py → _detect_injection(context)               │
 │                                                                │
-│  Patterns: "ignore previous", "ignore all", "disregard",       │
-│            "you are now", "new persona", "jailbreak",          │
-│            "override", "bypass", "forget instructions"         │
-│                                                                │
-│  Match found → injection=True (adds +10 to risk score)         │
+│  1. Strip zero-width & invisible Unicode control characters    │
+│  2. Apply Unicode NFKC normalization (catches homoglyphs)      │
+│  3. Decode Base64-encoded strings within context payload       │
+│  4. Match against pre-compiled regex attack signatures         │
+│  • Pattern matched → injection flag set (+50 risk points)      │
 └──────────────────────────────┬─────────────────────────────────┘
                                │ scan complete
                                ▼
 ┌────────────────────────────────────────────────────────────────┐
-│                  STAGE 6: Risk Scoring                         │
+│                  STAGE 6: Dynamic Risk Scoring                 │
 │                                                                │
-│  score = 0                                                     │
-│    + 40  if unknown/unapproved recipient                       │
-│    + 20  if amount > 80% of policy.max_amount                  │
-│    + 30  if anomaly detected (rate spike)                      │
-│    + 10  if injection keywords found                           │
+│  Risk Score (0–100):                                           │
+│    + 20  if amount > 80% of policy limit                       │
+│    + 30  if anomaly detected (>10 req/min)                     │
+│    + 50  if injection pattern detected                         │
 │                                                                │
 │  Decision:                                                     │
 │    score <  30  →  ALLOW                                       │
-│    30 ≤ score < 70  →  REVIEW (create approval record)         │
-│    score ≥  70  →  BLOCK                                       │
+│    30 ≤ score < 70  →  REVIEW (creates pending approval)       │
+│    score ≥  70  →  BLOCK (or hard-block trigger)               │
 └──────────────────────────────┬─────────────────────────────────┘
                                │
                                ▼
 ┌────────────────────────────────────────────────────────────────┐
-│                   STAGE 7: Audit & Response                    │
+│             STAGE 7: Execution Grant Issuance (ALLOW)          │
 │                                                                │
-│  Write to actions table: decision, risk_score, reason          │
-│  Write to audit_logs table: event_type, details                │
-│  If REVIEW: write to approvals table (status=pending)          │
-│  Broadcast to WebSocket clients: /ws/live                      │
+│  • Mint short-lived, single-use Execution Grant (JWT):         │
+│      - sub: agent_id                                           │
+│      - action_id: UUID                                         │
+│      - exp: 2 minutes                                          │
+│      - type: "execution_grant"                                 │
+│  • Broadcast action to WebSocket clients: /ws/live             │
+│  • Return: { decision, risk_score, grant_token, action_id }    │
+└──────────────────────────────┬─────────────────────────────────┘
+                               │
+                               │ Agent presents grant
+                               ▼
+┌────────────────────────────────────────────────────────────────┐
+│         STAGE 8: Cryptographic Execution Interception          │
+│  POST /api/gateway/execute                                     │
+│  Body: { grant_token, action_id }                              │
 │                                                                │
-│  Return: { "decision", "risk_score", "reason", "action_id" }  │
+│  ✓ Verify grant token signature & 2-minute expiry              │
+│  ✓ Verify grant action_id matches request                      │
+│  ✓ Verify grant has not been redeemed (replay prevention)      │
+│  ✓ Mark action executed = True in atomic transaction           │
+│  ✗ Expired or already used grant → 409 Conflict                │
+│  ✓ Forward request to protected internal service               │
 └────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 2. JWT Token Architecture
+## 2. Execution Gateway vs. Advisory Firewalls
 
-### Token Structure
+Traditional agent guardrails operate purely as advisory text classifiers: an agent calls an API, the guardrail suggests whether the text is safe, and the agent is expected to voluntarily comply.
 
-AgentShield uses **HS256-signed JWTs** (JSON Web Tokens) as agent identity credentials.
-
-```json
-// JWT Header
-{
-  "alg": "HS256",
-  "typ": "JWT"
-}
-
-// JWT Payload
-{
-  "sub": "agent_payment",
-  "agent_id": 1,
-  "permissions": {
-    "allowed_actions": ["transfer_money"],
-    "max_amount": 5000,
-    "approved_recipients": ["electricity_board", "water_dept", "gas_provider"]
-  },
-  "iat": 1700000000,
-  "exp": 1700086400
-}
-
-// Signature
-HMACSHA256(base64(header) + "." + base64(payload), "agentshield-secret-2024")
-```
-
-### Token Lifecycle
+AgentShield implements **True Execution Interception**:
 
 ```
-Register Agent (POST /api/agents)
-        │
-        ▼
-  create_agent_token(agent_id, permissions)
-        │  python-jose signs with HS256
-        ▼
-  Token returned ONCE to caller
-        │
-        │  Agent embeds token in every request
-        ▼
-  verify_token(token) on each request
-        │  Decodes, validates expiry, extracts agent_id
-        ▼
-  Agent identity confirmed without DB lookup on every call
+Advisory Guardrail (Vulnerable):
+AI Agent ────► Guardrail (Returns: "Please don't do this") ────► AI Agent (Ignores & calls Bank API directly)
+
+AgentShield Execution Gateway (Enforced):
+AI Agent ────► AgentShield (/api/gateway/authorize)
+                     │
+            [ALLOW + Grant Token]
+                     │
+AI Agent ────► AgentShield (/api/gateway/execute) ────► Protected Bank API
+                     ▲
+          (Zero credentials held by agent)
 ```
 
-> **Hackathon Note:** Secret key `agentshield-secret-2024` is hardcoded for demo simplicity. In production, this would be loaded from environment variables and rotated regularly.
-
-### Token Invalidation
-
-JWT tokens are stateless by design — they can't be "revoked" directly. AgentShield solves this via **agent status checks** (Stage 2 above): even a valid token is rejected if the agent is suspended or killed. This gives us effective token revocation without a token blacklist.
+The AI agent holds **zero direct credentials** to underlying services. Only the AgentShield gateway holds execution credentials. Without a valid, unredeemed execution grant token minted by AgentShield, calling downstream services is cryptographically impossible.
 
 ---
 
-## 3. Policy Engine Logic
+## 3. Adversarial Attack Lab Architecture
 
-### Database Schema
+AgentShield includes an automated red-team test harness (`/api/attack-lab/`) to benchmark security capabilities across 8 attack categories:
 
-```sql
--- Per-agent policies
-CREATE TABLE policies (
-  id                    INTEGER PRIMARY KEY,
-  agent_id              INTEGER REFERENCES agents(id),
-  action_type           TEXT,         -- e.g. "transfer_money"
-  max_amount            REAL,         -- maximum allowed transaction amount
-  approved_recipients   TEXT,         -- JSON array of allowed recipients
-  allowed_file_paths    TEXT,         -- JSON array of allowed path prefixes
-  requires_approval_above REAL        -- amount above which REVIEW is forced
-);
 ```
-
-### Policy Evaluation Matrix
-
-| Action Type | Policy Check | Hard Block Condition |
-|------------|-------------|---------------------|
-| `transfer_money` | amount ≤ max_amount AND recipient in approved_recipients | amount > max_amount OR unknown recipient |
-| `file_access` | path starts with any entry in allowed_file_paths | path not in allowed list |
-| `email_delete` | always REVIEW | never hard-block (human must decide) |
-| `email_read` | check agent has permission | action not in allowed_actions |
-| `calendar_read` | check agent has permission | action not in allowed_actions |
-| `calendar_write` | check agent has permission | action not in allowed_actions |
-
-### Pre-Seeded Agents
-
-```python
-# agent_payment
-permissions = {
-    "allowed_actions": ["transfer_money"],
-    "max_amount": 5000.0,
-    "approved_recipients": ["electricity_board", "water_dept", "gas_provider"]
-}
-
-# agent_email
-permissions = {
-    "allowed_actions": ["email_read", "email_delete", "file_access"],
-    "allowed_file_paths": ["documents/"]
-}
-
-# agent_calendar
-permissions = {
-    "allowed_actions": ["calendar_read", "calendar_write"]
-}
+┌────────────────────────────────────────────────────────────────────────┐
+│                     Adversarial Attack Suite                           │
+├──────────┬───────────────────────────────┬─────────────────────────────┤
+│ ID       │ Attack Name                   │ Defense Mechanism           │
+├──────────┼───────────────────────────────┼─────────────────────────────┤
+│ ATK-001  │ Direct Amount Limit Violation │ Policy max_amount boundary  │
+│ ATK-002  │ Unknown Recipient (₹100)      │ Zero-trust hard block       │
+│ ATK-003  │ Classic Prompt Injection      │ Context threat scanner      │
+│ ATK-004  │ Base64-Encoded Injection      │ Automatic Base64 decode     │
+│ ATK-005  │ Path Traversal (../../)       │ pathlib canonical sandbox   │
+│ ATK-006  │ Path Prefix Confusion         │ Directory boundary match    │
+│ ATK-007  │ Cross-Agent Permission Abuse  │ Manifest action scope check │
+│ ATK-008  │ Unicode Homoglyph Injection   │ NFKC Unicode normalization  │
+└──────────┴───────────────────────────────┴─────────────────────────────┘
 ```
 
 ---
 
-## 4. Risk Scoring Formula
+## 4. Database Schema
 
-Risk scoring is **additive** — each factor contributes independently:
-
-```
-RiskScore = Σ(applicable_factors)
-
-Factors:
-  F1 = 40  │ Recipient not in agent's approved_recipients list
-  F2 = 20  │ Amount > 80% of policy.max_amount
-             │   e.g. requesting $4,200 of $5,000 limit → +20
-  F3 = 30  │ Anomaly detected: request rate > 10/min in last 60s
-  F4 = 10  │ Prompt injection keywords found in context or params
-
-Decision Thresholds:
-  RiskScore  < 30  →  ALLOW    (green)
-  RiskScore 30–69  →  REVIEW   (amber) → creates approval record
-  RiskScore ≥ 70   →  BLOCK    (red)
-
-Override: Any hard policy violation → BLOCK regardless of risk score
-```
-
-### Example Calculations
-
-**Scenario A — Routine Payment:**
-```
-Transfer $2,500 to electricity_board
-  F1: electricity_board IS approved        → +0
-  F2: $2,500 is 50% of $5,000 limit       → +0 (< 80%)
-  F3: Normal rate                          → +0
-  F4: No injection keywords                → +0
-  ─────────────────────────────────────────
-  Total: 0 → ALLOW ✅
-```
-
-**Scenario B — Prompt Injection Attack:**
-```
-Transfer $25,000 to unknown_account (context: "ignore previous instructions")
-  F1: unknown_account NOT in approved list → +40
-  F2: $25,000 >> $5,000 (hard block first) → BLOCK ✗
-  (risk score computation halted at hard block)
-  
-  If computed: F1(40) + F2(20) + F4(10) = 70 → BLOCK ✅
-```
-
-**Scenario C — Borderline Large Transfer:**
-```
-Transfer $4,500 to electricity_board
-  F1: electricity_board IS approved        → +0
-  F2: $4,500 is 90% of $5,000 limit       → +20
-  F3: Normal rate                          → +0
-  F4: No injection keywords                → +0
-  ─────────────────────────────────────────
-  Total: 20 → ALLOW (but approaching REVIEW threshold)
-```
-
----
-
-## 5. WebSocket Live Updates
-
-### Protocol
+AgentShield stores all state in SQLite via SQLAlchemy 2.0 with foreign keys and cascading relationships:
 
 ```
-Client connects: ws://localhost:8000/ws/live
-
-Server broadcasts on each authorization decision:
-{
-  "event": "action_authorized",
-  "data": {
-    "action_id": 42,
-    "agent_id": 1,
-    "agent_name": "agent_payment",
-    "action_type": "transfer_money",
-    "decision": "ALLOW",
-    "risk_score": 0,
-    "reason": "All policy checks passed",
-    "timestamp": "2024-11-16T13:00:00Z"
-  }
-}
+┌──────────────┐         1:N         ┌───────────────┐
+│    agents    │────────────────────►│   policies    │
+└──────┬───────┘                     └───────────────┘
+       │
+       │ 1:N
+       ▼
+┌──────────────┐         1:1         ┌───────────────┐
+│   actions    │────────────────────►│   approvals   │
+└──────┬───────┘                     └───────────────┘
+       │
+       │ 1:N
+       ▼
+┌──────────────┐
+│  audit_logs  │
+└──────────────┘
 ```
 
-### Connection Management
-
-```python
-# FastAPI WebSocket manager (main.py)
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: List[WebSocket] = []
-
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-
-    async def broadcast(self, message: dict):
-        dead = []
-        for ws in self.active_connections:
-            try:
-                await ws.send_json(message)
-            except:
-                dead.append(ws)
-        for ws in dead:
-            self.active_connections.remove(ws)
-```
-
-### Frontend Usage
-
-```javascript
-// src/api.js
-const ws = new WebSocket('ws://localhost:8000/ws/live');
-ws.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-  // Update live feed, increment counters, re-fetch stats
-  onLiveAction(data);
-};
-```
-
----
-
-## 6. Database Schema (Full)
-
-```sql
-CREATE TABLE agents (
-  id               INTEGER PRIMARY KEY AUTOINCREMENT,
-  name             TEXT UNIQUE NOT NULL,
-  token            TEXT,                    -- JWT (stored for reference)
-  status           TEXT DEFAULT 'active',   -- active | suspended | killed
-  created_at       DATETIME DEFAULT NOW(),
-  permissions_json TEXT                     -- JSON blob of permissions
-);
-
-CREATE TABLE policies (
-  id                      INTEGER PRIMARY KEY AUTOINCREMENT,
-  agent_id                INTEGER REFERENCES agents(id),
-  action_type             TEXT,
-  max_amount              REAL,
-  approved_recipients     TEXT,             -- JSON array
-  allowed_file_paths      TEXT,             -- JSON array
-  requires_approval_above REAL
-);
-
-CREATE TABLE actions (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  agent_id    INTEGER REFERENCES agents(id),
-  action_type TEXT,
-  params_json TEXT,                         -- JSON blob of params
-  decision    TEXT,                         -- ALLOW | BLOCK | REVIEW
-  risk_score  INTEGER,
-  reason      TEXT,
-  created_at  DATETIME DEFAULT NOW(),
-  executed    BOOLEAN DEFAULT FALSE
-);
-
-CREATE TABLE approvals (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  action_id   INTEGER REFERENCES actions(id),
-  status      TEXT DEFAULT 'pending',       -- pending | approved | rejected
-  created_at  DATETIME DEFAULT NOW(),
-  resolved_at DATETIME
-);
-
-CREATE TABLE audit_logs (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  agent_id     INTEGER REFERENCES agents(id),
-  event_type   TEXT,                        -- ACTION_AUTHORIZED, AGENT_KILLED, etc.
-  details_json TEXT,                        -- JSON blob
-  created_at   DATETIME DEFAULT NOW()
-);
-
-CREATE TABLE rate_tracking (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  agent_id     INTEGER REFERENCES agents(id),
-  action_type  TEXT,
-  window_start DATETIME,
-  count        INTEGER DEFAULT 1
-);
-```
-
----
-
-## 7. OWASP LLM Top 10 Alignment
-
-| OWASP ID | Risk Name | AgentShield Component | Implementation |
-|----------|----------|----------------------|----------------|
-| **LLM01** | Prompt Injection | Injection Scanner (Stage 5) | Keyword pattern matching in context + params |
-| **LLM02** | Insecure Output Handling | Policy Engine (Stage 3) | Validates all outputs against policy before execution |
-| **LLM06** | Excessive Agency | Policy Enforcement | Per-agent action type allowlists, amount caps, recipient whitelists |
-| **LLM07** | System Prompt Leakage | JWT Payload Design | Permissions embedded in token, not exposed in prompts |
-| **LLM08** | Excessive Permissions | Principle of Least Privilege | Each agent has minimal required permissions only |
-| **LLM09** | Overreliance | Human Approval Center | REVIEW tier routes decisions to humans |
-| **LLM10** | Model Theft / DoS | Anomaly Detector (Stage 4) | Rate limiting with auto-suspension |
-
----
-
-## 8. Deployment Architecture (Production Extension)
-
-```
-                        ┌──────────────┐
-                        │  Load Balancer│
-                        └──────┬───────┘
-                               │
-              ┌────────────────┼────────────────┐
-              ▼                ▼                ▼
-      ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-      │ AgentShield  │ │ AgentShield  │ │ AgentShield  │
-      │  Instance 1  │ │  Instance 2  │ │  Instance N  │
-      └──────┬───────┘ └──────┬───────┘ └──────┬───────┘
-             └────────────────┼────────────────┘
-                              │
-                     ┌────────▼────────┐
-                     │   PostgreSQL    │
-                     │  (shared state) │
-                     └─────────────────┘
-                              │
-                     ┌────────▼────────┐
-                     │  Redis Pub/Sub  │
-                     │ (WS broadcast)  │
-                     └─────────────────┘
-```
-
-> **Note:** The hackathon implementation uses SQLite (single-file) for zero-dependency setup. A production deployment would use PostgreSQL for the database and Redis for distributed WebSocket pub/sub.
+- **`agents`**: Stores agent identity, status (`active`, `suspended`, `killed`), permission manifests, and active JWT.
+- **`policies`**: Per-agent constraints (`max_amount`, `approved_recipients`, `allowed_file_paths`, `requires_approval_above`).
+- **`actions`**: Log of every proposed action with decision (`ALLOW`, `REVIEW`, `BLOCK`), risk score, reason, execution status, and timestamp.
+- **`approvals`**: Human-in-the-loop pending tickets generated for `REVIEW` decisions, updated upon human review.
+- **`audit_logs`**: Immutable forensic event trail (`AGENT_SEEDED`, `ACTION_BLOCKED`, `AGENT_KILLED`, `APPROVAL_GRANTED`).
+- **`rate_tracking`**: Timestamped action occurrences used by the 60-second sliding-window anomaly detector.
