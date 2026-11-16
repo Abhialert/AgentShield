@@ -207,3 +207,4 @@ class AgentRunner:
         Yields chunks of text as the LLM generates them.
         """
         yield "AgentShield stream ready. Implement stream_run() during the sprint."
+

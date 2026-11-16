@@ -70,3 +70,4 @@ async def chat_stream(message: str, agent_name: str = "agent_payment", db: Sessi
         yield f"data: AgentShield stream ready for Nov 21 sprint.\n\n"
 
     return StreamingResponse(placeholder(), media_type="text/event-stream")
+
