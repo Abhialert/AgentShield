@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 import models
 import auth
 from database import engine, SessionLocal
-from routers import agents, actions, approvals, audit, demo, chat
+from routers import agents, actions, approvals, audit, demo, chat, gateway, attack_lab
 
 
 # ── WebSocket Connection Manager ───────────────────────────────────────────────
@@ -171,6 +171,8 @@ app.include_router(approvals.router)
 app.include_router(audit.router)
 app.include_router(demo.router)
 app.include_router(chat.router)
+app.include_router(gateway.router)
+app.include_router(attack_lab.router)
 
 
 @app.on_event("startup")

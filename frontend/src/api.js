@@ -39,5 +39,8 @@ export const resetDemo = () => api.get('/api/demo/reset')
 export const chatWithAgent = (message, agent_name) =>
   api.post('/api/chat', { message, agent_name })
 
+export const getAttackScenarios = () => api.get('/api/attack-lab/scenarios')
+export const runAttackSuite     = () => api.post('/api/attack-lab/run-suite')
+
 export default api
 

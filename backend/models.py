@@ -43,7 +43,7 @@ class Action(Base):
     __tablename__ = "actions"
 
     id = Column(String, primary_key=True, default=gen_uuid)
-    agent_id = Column(String, ForeignKey("agents.id"), nullable=False)
+    agent_id = Column(String, ForeignKey("agents.id"), nullable=True)   # nullable: auth-fail BLOCK still recorded
     action_type = Column(String, nullable=False)
     params_json = Column(Text, default="{}")
     decision = Column(String, nullable=False)   # ALLOW / BLOCK / REVIEW

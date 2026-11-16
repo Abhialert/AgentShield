@@ -2,12 +2,13 @@ import React from 'react'
 import { NavLink } from 'react-router-dom'
 
 const links = [
-  { to: '/dashboard', label: 'Dashboard',      icon: '📊' },
-  { to: '/demo',      label: 'Demo Center',     icon: '🎯', highlight: true },
-  { to: '/chat',      label: 'Agent Chat',      icon: '💬', livebuild: true },
-  { to: '/agents',    label: 'Agents',          icon: '🤖' },
-  { to: '/approvals', label: 'Approval Center', icon: '✅', badge: true },
-  { to: '/audit',     label: 'Audit Logs',      icon: '📋' },
+  { to: '/dashboard',  label: 'Dashboard',      icon: '📊' },
+  { to: '/demo',       label: 'Demo Center',     icon: '🎯', highlight: true },
+  { to: '/attack-lab', label: 'Attack Lab',      icon: '⚔️', highlight: true },
+  { to: '/chat',       label: 'Agent Chat',      icon: '💬', livebuild: true },
+  { to: '/agents',     label: 'Agents',          icon: '🤖' },
+  { to: '/approvals',  label: 'Approval Center', icon: '✅', badge: true },
+  { to: '/audit',      label: 'Audit Logs',      icon: '📋' },
 ]
 
 export default function Sidebar({ pendingCount = 0 }) {

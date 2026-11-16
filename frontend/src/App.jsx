@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import Sidebar from './components/Sidebar'
 import Dashboard from './pages/Dashboard'
 import DemoCenter from './pages/DemoCenter'
+import AttackLab from './pages/AttackLab'
 import Agents from './pages/Agents'
 import Approvals from './pages/Approvals'
 import AuditLogs from './pages/AuditLogs'
@@ -33,6 +34,7 @@ function AppLayout() {
           <Route path="/"           element={<Navigate to="/dashboard" replace />} />
           <Route path="/dashboard"  element={<Dashboard />} />
           <Route path="/demo"       element={<DemoCenter />} />
+          <Route path="/attack-lab" element={<AttackLab />} />
           <Route path="/chat"       element={<AgentChat />} />
           <Route path="/agents"     element={<Agents />} />
           <Route path="/approvals"  element={<Approvals />} />
