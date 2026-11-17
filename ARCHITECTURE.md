@@ -1,341 +1,349 @@
 # 🏗️ AgentShield — Technical Architecture
 
-> **A Zero-Trust Runtime Enforcement Gateway for Autonomous AI Agents.**
-> Model-independent. Cryptographically enforced. Independently verifiable.
+<div align="center">
+
+*Zero-Trust Runtime Enforcement Gateway for Autonomous AI Agents*
+*Model-independent · Cryptographically enforced · Independently verifiable*
+
+</div>
 
 ---
 
-## 1. The Two-Stage Enforcement Model
+## 1. Two-Stage Enforcement Model
 
-AgentShield enforces security through two distinct API calls that the agent must complete in sequence. There is no way for an agent to reach a protected service by bypassing either stage.
+AgentShield enforces security through two sequential API calls. There is **no path** to a protected service that bypasses either stage.
 
-### Stage 1 — Authorization (`POST /api/gateway/authorize`)
+```mermaid
+sequenceDiagram
+    participant A as 🤖 AI Agent
+    participant G as 🛡️ Gateway /authorize
+    participant DB as 🗄️ Database
+    participant H as 👤 Human (REVIEW)
+    participant E as 🔒 /execute
+    participant S as 🏦 Protected Service
 
-```
-Agent submits: { agent_token, action_type, params, context }
-
-7 Sequential Checks (fail-closed — any failure returns BLOCK immediately):
-
-  CHECK 1: JWT Signature
-    auth.verify_token(token)
-    → HS256 decode with AGENTSHIELD_SECRET (loaded from .env)
-    → token.type must be "agent" (not "execution_grant" or any other type)
-    → expired? → BLOCK "Invalid/expired token"
-
-  CHECK 2: Agent Existence & Status
-    DB query: agents WHERE id = agent_id
-    → not found?           → BLOCK "Agent not found"
-    → status == suspended? → BLOCK "Agent is suspended"
-    → status == killed?    → BLOCK "Agent is killed"
-    (Tokens issued before suspension are immediately invalidated here)
-
-  CHECK 3: Prompt Injection Scan
-    _detect_injection(context):
-      a. Strip zero-width & invisible Unicode control chars (category Cf, Cs)
-      b. NFKC normalization (collapses homoglyphs: ｉｇｎｏｒｅ → ignore)
-      c. Base64 auto-decode (chunks ≥8 chars matching [A-Za-z0-9+/=]+)
-      d. Regex match against known attack phrases
-    → ANY match → hard_block = True, risk_score = 100 (overrides everything)
-    Key: even valid params + injection in context = BLOCK.
-         Injection means the agent context may be compromised.
-
-  CHECK 4: Permission Manifest
-    agent.permissions_json → list of allowed action_types
-    → action_type not in list? → BLOCK "Action not permitted"
-
-  CHECK 5: Policy Enforcement (action_type-specific)
-    transfer_money:
-      → recipient not in approved_recipients? → BLOCK "Unapproved recipient"
-      → amount > max_amount?                  → BLOCK "Exceeds policy limit"
-    file_access:
-      → pathlib.Path(path).resolve() outside allowed_file_paths?
-                                              → BLOCK "Path traversal"
-
-  CHECK 6: Anomaly Detection
-    60-second sliding window per agent in rate_tracking table
-    → rate > 10 req/min  → risk += 30 (anomaly flag)
-    → rate > 20 req/min  → agent.status = "suspended" + BLOCK
-
-  CHECK 7: Risk Scoring & Decision
-    risk_score accumulates across checks:
-      + 20   if amount > 80% of max_amount
-      + 30   if anomaly detected
-      + 100  if injection detected (hard block)
-
-    ALLOW   → risk < 30       → mint ExecutionGrant (Step 2)
-    REVIEW  → 30 ≤ risk < 70  → create Approval record, return action_id
-    BLOCK   → risk ≥ 70       → audit log, return 200 with BLOCK decision
-```
-
-### Stage 2 — Execution (`POST /api/gateway/execute`)
-
-```
-Agent submits: { grant_token, action_id }
-
-  STEP 1: Verify grant JWT signature & expiry
-    auth.verify_execution_grant(grant_token, action_id)
-    → token.type must be "execution_grant"
-    → JWT exp must be in future (2-minute window from issuance)
-    → JWT action_id claim must match request body action_id
-    → Failure → HTTP 403
-
-  STEP 2: Atomic grant consumption (multi-worker safe)
-    DB atomic UPDATE:
-      UPDATE execution_grants
-        SET consumed_at = NOW()
-        WHERE jti = :jti
-          AND consumed_at IS NULL
-          AND expires_at > NOW()
-    → rowcount == 0 → HTTP 409 Conflict "Grant already used or expired"
-    → rowcount == 1 → proceed (this thread owns the grant exclusively)
-
-    Why this prevents race conditions:
-    SQLite serializes writes. The WHERE consumed_at IS NULL clause means
-    only one concurrent UPDATE can succeed. All others find consumed_at
-    already set and get rowcount=0. Verified with 20 simultaneous threads:
-    exactly 1 success, 19 conflict — every time.
-
-  STEP 3: Action validation
-    → Fetch action from DB by action_id
-    → action.decision must be "ALLOW" (not BLOCK or REVIEW)
-    → action.executed must be False (prevents double-execution)
-
-  STEP 4: Executor allowlist check
-    EXECUTORS dict is explicit: { "transfer_money", "email_read",
-                                  "file_access", "calendar_write" }
-    → action_type not in EXECUTORS → HTTP 400 (not fake success)
-
-  STEP 5: Protected executor call
-    result = EXECUTORS[action_type](params)
-    → raises exception → action.executed stays False, HTTP 500
-    → succeeds → action.executed = True, audit logged
-
-  Agent holds zero direct credentials to any downstream service.
-  The executor functions live inside the gateway — the agent never sees them.
+    A->>G: POST /api/gateway/authorize\n{ agent_token, action_type, params, context }
+    G->>G: 7-Stage Security Engine
+    alt BLOCK (risk ≥ 70)
+        G-->>A: { decision: BLOCK, risk_score, reason }
+    else REVIEW (30 ≤ risk < 70)
+        G->>DB: Create Approval (pending)
+        G-->>A: { decision: REVIEW, action_id }
+        H->>E: POST /api/approvals/{id}/approve
+    else ALLOW (risk < 30)
+        G->>DB: Mint ExecutionGrant (jti, 2-min expiry)
+        G-->>A: { decision: ALLOW, grant_token, action_id }
+        A->>E: POST /api/gateway/execute\n{ grant_token, action_id }
+    end
+    E->>DB: ATOMIC UPDATE consumed_at WHERE jti = ? AND consumed_at IS NULL
+    alt rowcount = 0
+        E-->>A: 409 Conflict — Replay Prevented
+    else rowcount = 1
+        E->>S: invoke executor(params)
+        S-->>E: result
+        E->>DB: action.executed = True + audit log
+        E-->>A: { status: executed, result }
+    end
 ```
 
 ---
 
-## 2. Replay Prevention: Why It's Concurrency-Safe
+## 2. The 7-Stage Security Engine
 
-A naive implementation uses an in-memory set to track used JTIs:
+Each stage is **fail-closed** — any failure returns `BLOCK` immediately without reaching subsequent stages.
+
+### Stage 1 — JWT Verification
+
+```
+auth.verify_token(agent_token)
+  ├─ HS256 decode with AGENTSHIELD_SECRET (loaded from .env at startup)
+  ├─ token.type must be "agent" (not "execution_grant" or any other type)
+  └─ expired? → BLOCK "Invalid/expired token"
+```
+
+### Stage 2 — Agent Status Check
+
+```
+DB: SELECT * FROM agents WHERE id = agent_id
+  ├─ not found?           → BLOCK "Agent not found"
+  ├─ status == suspended? → BLOCK "Agent is suspended"
+  └─ status == killed?    → BLOCK "Agent is killed"
+
+  ⚠️  Tokens issued BEFORE suspension are invalidated here retroactively.
+```
+
+### Stage 3 — Prompt Injection Scan
+
+```
+_detect_injection(context)  — 4-pass pipeline:
+
+  Pass 1 · Invisible Character Strip
+    Remove all Unicode category Cf (format) and Cs (surrogate) chars:
+    zero-width space (U+200B), zero-width joiner (U+200D), soft hyphen (U+00AD), etc.
+
+  Pass 2 · NFKC Normalization
+    unicodedata.normalize("NFKC", text)
+    Collapses: ｉｇｎｏｒｅ → ignore  (fullwidth → ASCII)
+               Superscripts, compatibility equivalents
+
+  Pass 3 · Base64 Auto-Decode
+    For each whitespace-delimited chunk ≥ 8 chars matching [A-Za-z0-9+/=]+:
+      decoded = base64.b64decode(chunk + "==").decode("utf-8")
+      Append decoded text to scan corpus
+
+  Pass 4 · Regex Pattern Match (re.IGNORECASE, compiled at startup)
+    Patterns: "ignore previous", "ignore your instructions", "you are now",
+              "new instructions", "forget your", "bypass security",
+              "ignore agentshield", "jailbreak", "do anything now", "dan mode"
+
+  Result:  ANY match → hard_block = True, risk_score = 100
+  Key:     valid params + injection in context = BLOCK
+           Injection means agent context may be compromised → zero trust
+```
+
+### Stage 4 — Permission Manifest
+
+```
+agent.permissions_json  →  ["transfer_money", "email_read", ...]
+  action_type not in list? → BLOCK "Action not permitted for this agent"
+```
+
+### Stage 5 — Policy Enforcement *(action-specific)*
+
+```
+transfer_money:
+  recipient not in approved_recipients[]  →  BLOCK "Unapproved recipient"
+  amount > policy.max_amount              →  BLOCK "Exceeds policy limit"
+
+file_access:
+  pathlib.Path(path).resolve()
+    outside allowed_file_paths[]          →  BLOCK "Path traversal detected"
+```
+
+### Stage 6 — Anomaly Detection
+
+```
+rate_tracking table (60-second sliding window per agent)
+
+  > 10 req/min  →  risk += 30  (anomaly flag)
+  > 20 req/min  →  agent.status = "suspended" + BLOCK (auto-kill)
+```
+
+### Stage 7 — Risk Scoring & Decision
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  Risk Accumulator                                        │
+│    + 20   amount > 80% of max_amount                     │
+│    + 30   anomaly detected                               │
+│    +100   injection detected (overrides all)             │
+└──────────────────────────────────────────────────────────┘
+
+  ALLOW   (risk < 30)      →  mint ExecutionGrant, return grant_token
+  REVIEW  (30 ≤ risk < 70) →  create Approval (pending), return action_id
+  BLOCK   (risk ≥ 70)      →  audit log, return BLOCK decision
+```
+
+---
+
+## 3. Replay Prevention — Atomic Concurrency-Safe Design
+
+### ❌ Naive Approach (Vulnerable)
 
 ```python
-# VULNERABLE (naive):
+# VULNERABLE — race condition between check and write
 if jti in _used_grants:
     raise HTTPException(409)
 _used_grants.add(jti)
-executor(params)  # Race window here — two threads can both pass the check
+executor(params)   # ← two threads can BOTH pass before either adds to set
 ```
 
-This fails under concurrency: two threads can both pass the check before either adds to the set.
-
-AgentShield's implementation:
+### ✅ AgentShield Approach (Atomic DB UPDATE)
 
 ```python
-# SAFE (atomic DB UPDATE):
+# SAFE — single atomic test-and-set at the database layer
 result = db.execute(
     update(ExecutionGrant)
     .where(
         ExecutionGrant.jti == jti,
-        ExecutionGrant.consumed_at.is_(None),
-        ExecutionGrant.expires_at > now,
+        ExecutionGrant.consumed_at.is_(None),     # ← "not yet consumed"
+        ExecutionGrant.expires_at > datetime.utcnow(),
     )
-    .values(consumed_at=now)
+    .values(consumed_at=datetime.utcnow())
 )
 db.commit()
-consumed = result.rowcount == 1  # True only for one thread
+consumed = result.rowcount == 1  # True for exactly ONE thread
 ```
 
-The database serializes the write. `WHERE consumed_at IS NULL` is an atomic test-and-set. This is also restart-safe (grants persist in DB, not in RAM) and multi-process safe (each process hits the same DB).
+**Why this is safe:**
+- SQLite serializes all writes
+- `WHERE consumed_at IS NULL` is an atomic test-and-set
+- Restart-safe: grants persist in DB, not in RAM
+- Multi-process safe: all processes share the same DB file (WAL mode)
+
+**Verified with 20 simultaneous threads → exactly 1 success, 19 conflict — every time.**
 
 ---
 
-## 3. Database Schema
+## 4. Database Schema
 
 ```
-agents
-  id            UUID PK
-  name          TEXT UNIQUE
-  status        TEXT  (active | suspended | killed)
-  permissions_json TEXT  (["transfer_money", ...])
-  token         TEXT  (raw JWT for internal gateway use — NOT returned by API)
-  token_hash    TEXT  (SHA-256 of token)
-  created_at    DATETIME
+┌─────────────────────────────────────────────────────────────────┐
+│  agents                                                         │
+│    id               UUID PK                                     │
+│    name             TEXT UNIQUE                                  │
+│    status           TEXT  (active | suspended | killed)         │
+│    permissions_json TEXT  (["transfer_money", ...])             │
+│    token            TEXT  ← raw JWT, internal only, NOT in API  │
+│    token_hash       TEXT  ← SHA-256, cannot authenticate        │
+│    created_at       DATETIME                                     │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │ 1:N
+┌──────────────────────────▼──────────────────────────────────────┐
+│  policies                                                       │
+│    id               UUID PK                                     │
+│    agent_id         UUID FK → agents.id                         │
+│    action_type      TEXT                                        │
+│    max_amount       FLOAT                                       │
+│    approved_recipients  TEXT (JSON array)                       │
+│    allowed_file_paths   TEXT (JSON array)                       │
+│    requires_approval_above  FLOAT                               │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+┌──────────────────────────▼──────────────────────────────────────┐
+│  actions                                                        │
+│    id               UUID PK                                     │
+│    agent_id         UUID FK → agents.id                         │
+│    action_type      TEXT                                        │
+│    params_json      TEXT                                        │
+│    decision         TEXT  (ALLOW | REVIEW | BLOCK)              │
+│    risk_score       INT                                         │
+│    reason           TEXT                                        │
+│    executed         BOOLEAN  ← True ONLY after confirmed success│
+│    created_at       DATETIME                                     │
+└──────────┬────────────────────────────────┬─────────────────────┘
+           │                                │
+┌──────────▼─────────────────┐  ┌───────────▼─────────────────────┐
+│  execution_grants           │  │  approvals                      │
+│    id         UUID PK       │  │    id          UUID PK          │
+│    action_id  UUID FK       │  │    action_id   UUID FK          │
+│    jti        TEXT UNIQUE ◄─┼──┼─── (key: UniqueConstraint)     │
+│    expires_at DATETIME      │  │    status      TEXT             │
+│    consumed_at DATETIME NULL│  │    resolved_at DATETIME NULL    │
+│    ← NULL = unused          │  │    execution_result TEXT (JSON) │
+│    ← non-NULL = consumed    │  └─────────────────────────────────┘
+└─────────────────────────────┘
 
-policies
-  id            UUID PK
-  agent_id      UUID FK → agents.id
-  action_type   TEXT
-  max_amount    FLOAT
-  approved_recipients  TEXT (JSON array)
-  allowed_file_paths   TEXT (JSON array)
-  requires_approval_above FLOAT
-
-actions
-  id            UUID PK
-  agent_id      UUID FK → agents.id
-  action_type   TEXT
-  params_json   TEXT
-  decision      TEXT  (ALLOW | REVIEW | BLOCK)
-  risk_score    INT
-  reason        TEXT
-  executed      BOOLEAN  (True only after confirmed executor success)
-  created_at    DATETIME
-
-execution_grants                         ← Key table (atomic replay prevention)
-  id            UUID PK
-  action_id     UUID FK → actions.id
-  jti           TEXT UNIQUE              ← UniqueConstraint prevents duplicate rows
-  expires_at    DATETIME                 ← 2 minutes from issuance
-  consumed_at   DATETIME NULL            ← NULL = unused; non-NULL = consumed
-
-approvals
-  id            UUID PK
-  action_id     UUID FK → actions.id
-  status        TEXT  (pending | approved | rejected | failed)
-  resolved_at   DATETIME NULL
-  execution_result TEXT (JSON — executor output or failure reason)
-
-audit_logs
-  id            UUID PK
-  agent_id      UUID FK → agents.id
-  event_type    TEXT
-  details_json  TEXT
-  created_at    DATETIME
-
-rate_tracking
-  id            UUID PK
-  agent_id      UUID FK → agents.id
-  action_type   TEXT
-  timestamp     DATETIME
+┌──────────────────────────────────────────────────────────────────┐
+│  audit_logs                      rate_tracking                  │
+│    id         UUID PK              id          UUID PK           │
+│    agent_id   UUID FK              agent_id    UUID FK           │
+│    event_type TEXT                 action_type TEXT              │
+│    details_json TEXT               timestamp   DATETIME          │
+│    created_at DATETIME                                           │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 **Token security design:**
-- `agents.token` — raw JWT stored for internal gateway use (AI agent runner needs to call gateway on agent's behalf). Never returned by `GET /api/agents`.
-- `agents.token_hash` — SHA-256 of token. Cannot be used as authentication credential (gateway verifies JWT signature, not hash).
-- `AgentOut` Pydantic schema: no `token` field, no `token_hash` field.
-- `AgentCreatedOut`: includes `token` exactly once, at agent creation time.
+
+| Field | Location | Exposed via API? | Purpose |
+|-------|----------|-----------------|---------|
+| `agents.token` | DB only | ❌ Never | Internal gateway calls by agent runner |
+| `agents.token_hash` | DB only | ❌ Never | Audit / verification (cannot authenticate) |
+| `AgentOut` schema | API response | ✅ (no token fields) | Public agent info |
+| `AgentCreatedOut` | Creation response only | ✅ Once | Issued to agent at registration |
 
 ---
 
-## 4. Security Engine — Injection Detection Pipeline
+## 5. AI Agent Architecture — Dual-Layer Design
 
 ```
-Input: context string (the natural-language command the agent was given)
-
-Step 1: Invisible character removal
-  "".join(c for c in text if unicodedata.category(c) not in ("Cf", "Cs"))
-  Removes: zero-width space (U+200B), zero-width joiner (U+200D),
-           soft hyphen (U+00AD), and all other format/surrogate chars.
-
-Step 2: NFKC Unicode normalization
-  unicodedata.normalize("NFKC", text)
-  Collapses: fullwidth chars (ｉｇｎｏｒｅ → ignore),
-             superscripts, compatibility equivalents.
-
-Step 3: Base64 decode attempt
-  For each whitespace-delimited chunk:
-    if len(chunk) >= 8 and chunk matches [A-Za-z0-9+/=]+:
-      decoded = base64.b64decode(chunk + "==").decode("utf-8")
-      append decoded to scan corpus
-
-Step 4: Regex pattern match
-  Patterns include: "ignore previous", "ignore your instructions",
-  "you are now", "new instructions", "forget your", "bypass security",
-  "ignore agentshield", "jailbreak", "do anything now", "dan mode", etc.
-  → Compiled at startup with re.IGNORECASE
-
-Result: ANY match → hard_block = True, risk_score = 100
-  Hard block is not additive — it overrides the final decision unconditionally.
-  Valid params + injection in context = BLOCK.
-  This is the zero-trust stance: injection means the agent may be compromised.
-```
-
----
-
-## 5. AI Agent Architecture (Dual-Layer)
-
-```
-User message
+User Message
      │
      ▼
-Layer 1 (Pre-built, active): Deterministic Intent Parser
-  _parse_intent(message):
-    - Regex extracts tool type, amount, recipient, file path, event title
-    - Pattern matched → { tool, params, context }
-    - No match → "I can help with: payments, emails, files, calendar"
-    50/50 Rule: ZERO LLM API calls in this layer.
-
-Layer 2 (Nov 21 live build): Gemini 1.5 Flash Function Calling
-  _call_gemini_llm(message, available_tools):
-    - Gemini proposes tool calls via function calling API
-    - AgentShield intercepts EVERY proposed call (agent cannot self-authorize)
-    - Streaming SSE for real-time output
-     │
-     ▼
-AgentRunner._route_through_agentshield(tool, params, context)
-  → security_engine.authorize_action(db, token, action_type, params, context)
-  → Returns (decision, risk_score, reason, action_id)
-  → Builds natural-language response with enforcement result
+┌─────────────────────────────────────────────────────────────┐
+│  Layer 1 — Deterministic Intent Parser  (PRE-BUILD)         │
+│                                                             │
+│  _parse_intent(message)                                     │
+│    ├─ Regex extracts: action_type · amount · recipient       │
+│    │                  file_path · event_title · email_query  │
+│    ├─ Pattern matched → { tool, params, context }            │
+│    └─ No match → "I can help with: payments, emails, files,  │
+│                   calendar" (safe fallback)                  │
+│                                                             │
+│  50/50 Rule: ZERO LLM API calls in this layer.             │
+└──────────────────────┬──────────────────────────────────────┘
+                       │
+                       ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Layer 2 — Gemini 1.5 Flash Function Calling  (NOV 21)      │
+│                                                             │
+│  _call_gemini_llm(message, available_tools)                 │
+│    ├─ Gemini proposes tool calls via function calling API   │
+│    ├─ Streaming SSE for real-time output                    │
+│    └─ AgentShield intercepts EVERY proposed call            │
+│       (agent cannot self-authorize — gateway decision final)│
+└──────────────────────┬──────────────────────────────────────┘
+                       │
+                       ▼
+        AgentRunner._route_through_agentshield()
+          → security_engine.authorize_action()
+          → Returns (decision, risk_score, reason, action_id)
+          → Builds natural-language response with result
 ```
 
-**Key architectural guarantee:** The LLM never decides whether its own action is safe. The gateway decision is final. If Gemini is manipulated into proposing an unauthorized action, the gateway blocks it and reports `executor_invoked=False`.
+> **Key guarantee:** The LLM never decides whether its own action is safe. If Gemini is manipulated into proposing an unauthorized action, the gateway blocks it and reports `executor_invoked = False`.
 
 ---
 
 ## 6. Adversarial Attack Lab — Gateway Integration
 
-All 8 attacks route through the real two-stage gateway (not a mock):
+All 8 attacks route through the **real two-stage gateway** (not a mock):
 
 ```python
-# For each attack vector:
-1. POST /api/gateway/authorize  → decision, grant_token
-2. if decision == "ALLOW":
-     POST /api/gateway/execute  → executor_invoked = True
-   else:
-     executor_invoked = False   # Gateway prevented execution
+for attack in attack_vectors:
+    # Stage 1: Request authorization
+    auth_response = POST /api/gateway/authorize (attack.params)
+    decision = auth_response.decision
 
-# attack_lab.py tracks executor_invoked per attack.
-# A blocked attack that shows executor_invoked=True is a security failure.
-# Target: executor_invoked=0 on all blocked attacks.
+    # Stage 2: Attempt execution only if authorized
+    if decision == "ALLOW":
+        exec_response = POST /api/gateway/execute (grant_token)
+        executor_invoked = True   # ← Security failure if attack was blocked
+    else:
+        executor_invoked = False  # ← Expected for all 8 attacks
+
+# Target: 8/8 BLOCK, executor_invoked = 0 on all blocked attacks
 ```
 
-Verified result: `8/8 intercepted, executor_invoked_on_blocked_attacks=0`
+**Result:** `8/8 intercepted · executor_invoked_on_blocked_attacks = 0` ✅
 
 ---
 
 ## 7. Human Approval Workflow
 
-```
-REVIEW decision:
-  1. gateway.py creates Approval record (status=pending)
-  2. Frontend polls GET /api/approvals/pending every 10s
-  3. Human reviews: params, risk_score, reason, agent identity
-  4. POST /api/approvals/{action_id}/approve
-
-approve_action():
-  executor = EXECUTORS.get(action.action_type)
-  try:
-      result = executor(params)         ← real executor called
-      action.executed = True            ← only set after confirmed success
-      approval.status = "approved"
-  except Exception as e:
-      action.executed = False           ← failure keeps executed=False
-      approval.status = "failed"
-      approval.execution_result = { error, status: "FAILED" }
-      audit log: EXECUTION_FAILED
+```mermaid
+flowchart LR
+    A["🤖 Agent\nAction Proposed"] -->|REVIEW decision| B["📋 Approval Record\nstatus = pending"]
+    B --> C["👤 Human Reviews\nparams · risk · agent identity"]
+    C -->|Approve| D["⚙️ Executor Called\nresult captured"]
+    C -->|Reject| E["❌ status = rejected\nAudit Logged"]
+    D -->|Success| F["✅ action.executed = True\nstatus = approved"]
+    D -->|Failure| G["🔴 action.executed = False\nstatus = failed · audit EXECUTION_FAILED"]
 ```
 
-Approval cannot be reused: once `status` is `approved` or `failed`, re-approval raises `HTTP 400 "Approval is already approved/failed"`.
+**Re-approval guard:** Once `status` is `approved` or `failed`, re-approval raises `HTTP 400 "Approval already resolved"`.
 
 ---
 
-## 8. What AgentShield Does NOT Claim
+## 8. Known Limitations
 
-- **Not a production deployment.** Services are simulated (no real bank, no real email).
-- **Not a persistent secrets store.** `agents.token` in SQLite is appropriate for a demo; production would use a secrets manager.
-- **Not crash-recovery safe.** If the process crashes after the external action succeeds but before `action.executed = True` is written, the state is inconsistent. Production would use a distributed transaction or idempotency key.
-- **Not distributed-process tested.** The atomic `UPDATE WHERE consumed_at IS NULL` is safe across SQLite-shared-file processes (SQLite WAL mode), but not across separate database replicas.
+> These are documented intentionally — not discovered as surprises.
 
-These are known limitations documented here so they are not discovered as surprises.
+| Limitation | Detail |
+|------------|--------|
+| **Simulated services** | Bank / Email / File / Calendar executors are stubs — no real external calls |
+| **SQLite only** | Atomic `UPDATE WHERE consumed_at IS NULL` is WAL-safe, but not cross-replica safe |
+| **No crash recovery** | If process crashes after executor succeeds but before `action.executed = True`, state is inconsistent |
+| **Demo secret store** | `agents.token` in SQLite is appropriate for demo; production would use a secrets manager |
+| **No LLM in pre-build** | Layer 2 Gemini block is scaffolded as comments — wired Nov 21 live sprint |
