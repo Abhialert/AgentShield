@@ -2,102 +2,138 @@
 
 # 🛡️ AgentShield
 
-**Zero-Trust Runtime Enforcement Gateway for Autonomous AI Agents**
+### Enforce What AI Agents Can Actually Do — Not Just What They're Told
 
+*A Zero-Trust Runtime Enforcement Gateway for Autonomous AI Agents.*
 *Model-independent. Cryptographically enforced. Independently verifiable.*
 
+<br/>
+
 [![Python](https://img.shields.io/badge/Python-3.11--3.13-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
-[![React](https://img.shields.io/badge/React-18-61DAFB?style=for-the-badge&logo=react&logoColor=black)](https://reactjs.org)
-[![SQLite](https://img.shields.io/badge/SQLite-WAL-003B57?style=for-the-badge&logo=sqlite&logoColor=white)](https://sqlite.org)
-[![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
-[![Tests](https://img.shields.io/badge/Security%20Audit-16%2F16%20PASS-brightgreen?style=for-the-badge)](backend/test_deep_audit.py)
+[![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![React](https://img.shields.io/badge/React_18-61DAFB?style=for-the-badge&logo=react&logoColor=black)](https://reactjs.org)
+[![SQLite](https://img.shields.io/badge/SQLite-WAL_Mode-003B57?style=for-the-badge&logo=sqlite&logoColor=white)](https://sqlite.org)
+[![Tests](https://img.shields.io/badge/Security_Audit-16%2F16_PASS-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](backend/test_deep_audit.py)
+[![License](https://img.shields.io/badge/License-MIT-22c55e?style=for-the-badge)](LICENSE)
 
 </div>
 
 ---
 
-## 🧩 The Problem
+## 🏆 Hackathon Information
 
-Traditional AI guardrails ask the model *not to misbehave* — they fail the moment an agent is manipulated, hallucinating, or adversarially prompted.
+| Detail | Information |
+|--------|-------------|
+| **Hackathon** | GeNarrative Clash 2026 |
+| **Track** | Open Innovation |
+| **Phase** | Phase 02 — MVP |
+| **Team Name** | Ease It Out |
+| **Project** | AgentShield |
+
+---
+
+## 👥 Team — Ease It Out
+
+| Member |
+|--------|
+| Abhishek Gupta |
+| MD Ibrahim |
+| Sanchita Pandey |
+| Saquib Rabban |
+
+---
+
+## 🎬 Demo Video
+
+> 📽️ **[Watch the AgentShield Demo →](https://your-demo-link-here)**
+>
+> *A walkthrough of the security dashboard, attack lab, and human approval flow.*
+
+---
+
+## 💡 Problem Statement
+
+AI agents are increasingly trusted with high-stakes actions — transferring money, reading emails, accessing files. But today's guardrails share a critical flaw:
 
 ```
-❌  Conventional (vulnerable)
-    AI Agent ──► "Please don't do this" ──► Agent ignores it ──► Bank API called
+❌  Conventional Approach (Vulnerable)
+    ─────────────────────────────────────────────────────────
+    AI Agent  ──►  "Please don't do this"  ──►  Agent ignores it
+                                                      │
+                                                      ▼
+                                               Bank API called anyway
 ```
 
+This fails the moment an agent is **manipulated, hallucinating, or adversarially prompted**.
+
+Traditional safety measures rely on the model itself to self-police. But models can be:
+- Jailbroken through prompt injection
+- Manipulated via encoded or Unicode-obfuscated payloads
+- Tricked into cross-agent privilege escalation
+- Compromised through replay of old execution tokens
+
+**The model cannot be trusted to be its own security boundary.**
+
+---
+
+## 🚀 Our Solution
+
+AgentShield enforces security **at the infrastructure layer** — completely independent of whatever the AI decides.
+
 ```
-✅  AgentShield (enforced)
-    AI Agent ──► POST /authorize ──► BLOCK / REVIEW / ALLOW + grant_token
-                                                       │
-                 POST /execute { grant_token } ────────┘──► Protected Service
+✅  AgentShield (Enforced)
+    ─────────────────────────────────────────────────────────
+    AI Agent  ──►  POST /api/gateway/authorize
+                         │
+                    7-Stage Security Engine
+                         │
+               ┌─────────┼──────────┐
+            ALLOW      REVIEW     BLOCK
+               │          │          │
+         Grant Token   Human      Instant
+         (2-min,       Approval   Termination
+          single-use)  Queue      + Audit Log
+               │          │
+               └────┬─────┘
+                    ▼
+           POST /api/gateway/execute { grant_token }
+                    │
+              Atomic Consume
+              (replay-proof)
+                    │
+                    ▼
+           Protected Service (Bank / Email / File)
 ```
 
 > **The AI agent holds zero direct credentials to any downstream service.**
-> No grant → No execution. No exceptions.
+> It can only *propose* actions. It cannot *execute* them.
+> No valid execution grant → No execution. No exceptions.
 
 ---
 
-## ⚡ How It Works
+## ✨ Core Features
 
-```mermaid
-flowchart TD
-    A["🤖 AI Agent\n(proposes action)"] -->|POST /api/gateway/authorize| B
-
-    subgraph B["🔒 7-Stage Security Engine"]
-        B1["1️⃣  JWT Verification\nHS256 + env secret"] --> B2
-        B2["2️⃣  Agent Status Check\nsuspended / killed → BLOCK"] --> B3
-        B3["3️⃣  Prompt Injection Scan\nNFKC + Base64 + zero-width strip"] --> B4
-        B4["4️⃣  Permission Manifest\naction must be in agent scope"] --> B5
-        B5["5️⃣  Policy Enforcement\nrecipient allowlist · amount ceiling"] --> B6
-        B6["6️⃣  Anomaly Detection\n60s sliding window · auto-suspend"] --> B7
-        B7["7️⃣  Risk Scoring\n0–100 deterministic thresholds"]
-    end
-
-    B7 -->|risk < 30| C["✅ ALLOW\nMint ExecutionGrant\n2-min · single-use · jti"]
-    B7 -->|30 ≤ risk < 70| D["⏳ REVIEW\nHuman Approval Queue"]
-    B7 -->|risk ≥ 70| E["🚫 BLOCK\nAudit Logged · Instant Stop"]
-
-    C -->|POST /api/gateway/execute| F["⚙️ Atomic Grant Consume\nUPDATE WHERE consumed_at IS NULL"]
-    D -->|Human approves| F
-    F -->|rowcount = 1| G["🏦 Protected Service\nBank · Email · File · Calendar"]
-    F -->|rowcount = 0| H["🔁 409 Conflict\nReplay Attack Prevented"]
-```
-
----
-
-## ✅ Verified Security Properties
-
-> All properties are verified by a **reproducible test suite** — not just claims.
-
-| # | Property | Verification | Status |
-|---|-----------|-------------|--------|
-| 1 | Agent token never exposed | `GET /api/agents` → no `token` or `token_hash` field | ✅ PASS |
-| 2 | Token hash cannot authenticate | SHA-256 of token → `BLOCK: Invalid/expired token` | ✅ PASS |
-| 3 | Suspended agent = instant revocation | Kill → previously issued token → `BLOCK` | ✅ PASS |
-| 4 | Unknown action type rejected | `delete_all_files` → not in executor allowlist → `BLOCK` | ✅ PASS |
-| 5 | Concurrent replay prevention | 20 threads, same grant → **1 success, 19 conflict** | ✅ PASS |
-| 6 | Executor failure = not-executed | Simulated failure → `action.executed` stays `False` | ✅ PASS |
-| 7 | Injection = hard block | `Ignore previous instructions` in context → risk=100 | ✅ PASS |
-| 8 | Attack lab via real gateway | 8/8 attacks through authorize→execute pipeline | ✅ PASS |
-
-```bash
-# Reproduce the audit yourself:
-cd backend
-.\venv\Scripts\python.exe test_deep_audit.py
-# Expected: ✅ 16/16 PASS
-```
+- 🔒 **7-Stage Zero-Trust Engine** — JWT verification, injection scan, permission manifest, policy enforcement, anomaly detection, risk scoring — all in sequence, all fail-closed
+- 🔑 **Single-Use Execution Grants** — Cryptographic 2-minute tokens, atomically consumed at the DB layer — replay-proof even under concurrent requests
+- 💉 **Multi-Vector Injection Defense** — NFKC normalization, Base64 auto-decode, invisible Unicode strip, regex matching — catches encoded and homoglyph attacks
+- 👤 **Human-in-the-Loop Approvals** — Medium-risk actions (risk 30–69) land in a human review queue before any executor is invoked
+- ⚔️ **Live Adversarial Attack Lab** — 8 real attack vectors routed through the actual two-stage gateway — not mocks
+- 📡 **Real-Time SOC Dashboard** — WebSocket-powered live feed of every security event, block rate, agent status
+- 🔴 **Agent Kill Switch** — Suspend or kill an agent; previously issued tokens are immediately invalidated
+- 📋 **Forensic Audit Trail** — Every event logged with agent identity, decision, risk score, and timestamp
 
 ---
 
 ## ⚔️ Adversarial Attack Lab — 8/8 Intercepted
 
+Navigate to `/attack-lab` → **Run Attack Suite**. All 8 attacks route through the real two-stage gateway.
+
 | ID | Attack Vector | Technique | Gateway Stage | Result |
 |----|--------------|-----------|--------------|--------|
 | ATK-001 | Direct Amount Limit Violation | Transfer ₹50,000 (10× limit) | Policy Engine | 🚫 BLOCKED |
 | ATK-002 | Unknown Recipient Zero-Trust | ₹100 to offshore account | Recipient Allowlist | 🚫 BLOCKED |
-| ATK-003 | Classic Prompt Injection | `Ignore previous instructions` | Injection Scanner | 🚫 BLOCKED |
-| ATK-004 | Base64-Encoded Injection | Malicious payload hidden in Base64 | Auto-decoded, Scanner | 🚫 BLOCKED |
+| ATK-003 | Classic Prompt Injection | `Ignore previous instructions` in context | Injection Scanner | 🚫 BLOCKED |
+| ATK-004 | Base64-Encoded Injection | Malicious payload hidden in Base64 | Auto-decoded + Scanner | 🚫 BLOCKED |
 | ATK-005 | Path Traversal | `../../etc/passwd` | pathlib canonical sandbox | 🚫 BLOCKED |
 | ATK-006 | Path Prefix Confusion | `documents_evil/secrets.env` | Directory boundary check | 🚫 BLOCKED |
 | ATK-007 | Cross-Agent Privilege Escalation | Email agent proposes `transfer_money` | Permission Manifest | 🚫 BLOCKED |
@@ -107,93 +143,144 @@ cd backend
 
 ---
 
+## ✅ Verified Security Properties
+
+> These are **not claims** — they are verified by a reproducible audit suite against a live server.
+
+| # | Property | How It's Verified | Status |
+|---|-----------|-------------------|--------|
+| 1 | Agent token never exposed via API | `GET /api/agents` → no `token` or `token_hash` field | ✅ PASS |
+| 2 | Token hash cannot authenticate | SHA-256 of token → `BLOCK: Invalid/expired token` | ✅ PASS |
+| 3 | Suspended agent = instant revocation | Kill → previously issued token → `BLOCK` | ✅ PASS |
+| 4 | Unknown action type rejected | `delete_all_files` → not in executor allowlist → `BLOCK` | ✅ PASS |
+| 5 | Concurrent replay prevention | 20 threads, same grant → **1 success, 19 conflict** | ✅ PASS |
+| 6 | Executor failure preserves not-executed state | Simulated failure → `action.executed` stays `False` | ✅ PASS |
+| 7 | Injection = unconditional hard block | `Ignore previous instructions` → `risk=100` → `BLOCK` | ✅ PASS |
+| 8 | Attack lab via real gateway | 8/8 attacks through authorize → execute pipeline | ✅ PASS |
+
+```bash
+# Reproduce the full audit yourself:
+cd backend
+.\venv\Scripts\python.exe test_deep_audit.py
+
+# Expected output:
+# ✅ 16/16 PASS
+```
+
+---
+
+## 🏗️ System Architecture
+
+```mermaid
+flowchart TD
+    A["🤖 AI Agent\nProposes action — holds zero service credentials"] -->|POST /api/gateway/authorize| B
+
+    subgraph B["🔒 7-Stage Security Engine"]
+        direction TB
+        B1["1️⃣ JWT Verification\nHS256 + env secret"] --> B2["2️⃣ Agent Status\nsuspended / killed → BLOCK"]
+        B2 --> B3["3️⃣ Injection Scan\nNFKC · Base64 · zero-width strip"]
+        B3 --> B4["4️⃣ Permission Manifest\naction must be in agent scope"]
+        B4 --> B5["5️⃣ Policy Enforcement\nrecipient allowlist · amount ceiling"]
+        B5 --> B6["6️⃣ Anomaly Detection\n60s sliding window · auto-suspend"]
+        B6 --> B7["7️⃣ Risk Scoring\n0–100 deterministic thresholds"]
+    end
+
+    B7 -->|"risk < 30"| C["✅ ALLOW\nMint ExecutionGrant\n2-min · single-use"]
+    B7 -->|"30 ≤ risk < 70"| D["⏳ REVIEW\nHuman Approval Queue"]
+    B7 -->|"risk ≥ 70"| E["🚫 BLOCK\nAudit Logged · Instant Stop"]
+
+    C -->|POST /api/gateway/execute| F["⚙️ Atomic Grant Consume\nUPDATE WHERE consumed_at IS NULL"]
+    D -->|Human approves| F
+
+    F -->|rowcount = 1| G["🏦 Protected Service\nBank · Email · File · Calendar"]
+    F -->|rowcount = 0| H["🔁 409 Conflict\nReplay Attack Prevented"]
+```
+
+---
+
 ## 🚀 Quick Start
 
 ### Prerequisites
 
-| Requirement | Version |
-|-------------|---------|
+| Tool | Version |
+|------|---------|
 | Python | 3.11 – 3.13 |
 | Node.js | 18+ |
 | npm | 9+ |
+| Git | Any |
 
-### ▶️ One-Click Start (Windows)
+### ▶️ One-Click Start
 
+**Windows:**
 ```bat
 start.bat
 ```
 
-> Auto-creates venv · generates secret · installs deps · starts both servers
-
-### 🐧 macOS / Linux
-
+**macOS / Linux:**
 ```bash
 chmod +x start.sh && ./start.sh
 ```
+
+> Both scripts auto-create the venv, generate a secure secret, install all dependencies, and start both servers.
 
 ### 🔧 Manual Setup
 
 <details>
 <summary>Expand manual instructions</summary>
 
-**Backend (port 8000)**
+**1. Backend (port 8000)**
 ```bash
 cd backend
 python -m venv venv
-.\venv\Scripts\pip install -r requirements.txt    # Windows
-# source venv/bin/activate && pip install -r requirements.txt  # macOS/Linux
+
+# Windows
+.\venv\Scripts\pip install -r requirements.txt
 .\venv\Scripts\uvicorn main:app --port 8000
+
+# macOS / Linux
+source venv/bin/activate
+pip install -r requirements.txt
+uvicorn main:app --port 8000
 ```
 
-**Frontend (port 3000)**
+**2. Frontend (port 3000)**
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
 
-**Ports:**
-- 🖥️ Dashboard → `http://localhost:3000`
-- 📡 API Docs  → `http://localhost:8000/docs`
+| URL | Purpose |
+|-----|---------|
+| `http://localhost:3000` | 🖥️ Security Dashboard |
+| `http://localhost:8000/docs` | 📡 Interactive API Docs |
 
 </details>
 
 ---
 
-## 🔐 Security Architecture
+## 🔐 Environment Configuration
 
-### Hard-Block Rules *(Fail-Closed)*
-
-Every condition below triggers an unconditional `BLOCK` at `risk = 100`:
-
-```
-🔴  Invalid / expired JWT          →  cryptographic HMAC-SHA256 failure
-🔴  Unknown agent                  →  not in database
-🔴  Suspended / killed agent       →  previously issued tokens immediately revoked
-🔴  Prompt injection detected      →  zero-trust hard block even if params are valid
-🔴  Unapproved recipient           →  unknown transfer target
-🔴  Executor not in allowlist      →  unknown action_type → HTTP 400
-🔴  Expired execution grant        →  past 2-minute window → HTTP 403
-🔴  Replayed execution grant       →  already consumed jti → HTTP 409 Conflict
+```bash
+# backend/.env  (auto-generated by start.bat / start.sh)
+AGENTSHIELD_SECRET=<64-char hex string>  # HS256 signing key for all JWTs
+GEMINI_API_KEY=your_api_key_here         # Required for Layer 2 (Nov 21 live build)
 ```
 
-### Dynamic Risk Scoring
+> ⚠️ **Never commit API keys or secrets to GitHub.** The `.env` file is in `.gitignore`. Use `.env.example` as a template.
 
-```
-Risk Score (0 – 100)
-  ┌─────────────────────────────────────────────────┐
-  │  + 20   if amount > 80% of policy limit         │
-  │  + 30   if anomaly detected (> 10 req / 60s)    │
-  │  +100   if prompt injection detected (hard)     │
-  └─────────────────────────────────────────────────┘
+---
 
-Decision Thresholds
-  ┌──────────┬────────────────┬────────────────────────────┐
-  │  ALLOW   │  risk < 30     │  ExecutionGrant issued      │
-  │  REVIEW  │  30 ≤ risk <70 │  Human approval required    │
-  │  BLOCK   │  risk ≥ 70     │  Instant termination        │
-  └──────────┴────────────────┴────────────────────────────┘
-```
+## 🧰 Tech Stack
+
+| Layer | Technology | Purpose |
+|-------|-----------|---------|
+| **Backend** | FastAPI + Python 3.13 | Async gateway · security engine · REST API |
+| **Auth** | python-jose HS256 | Environment-keyed agent JWTs + single-use execution grants |
+| **Database** | SQLite + SQLAlchemy 2.0 | Atomic grant consumption · policy store · full audit trail |
+| **Frontend** | React 18 + Vite + Tailwind CSS | Real-time security operations dashboard |
+| **Real-time** | Native WebSockets | Sub-50ms live feed for every security event |
+| **AI Agent** | Deterministic parser (Layer 1) + Gemini 1.5 Flash (Layer 2) | Natural-language tool calls enforced through gateway |
 
 ---
 
@@ -224,43 +311,40 @@ AgentShield/
 │   ├── Dashboard.jsx            # Live SOC dashboard (WebSocket)
 │   ├── AttackLab.jsx            # Attack suite with executor_invoked column
 │   ├── AgentChat.jsx            # Interactive chat with DecisionCard
-│   ├── Approvals.jsx            # Human approval queue
+│   ├── Approvals.jsx            # Human-in-the-loop approval queue
 │   ├── Agents.jsx               # Agent management + kill switch
-│   ├── DemoCenter.jsx           # Pre-built scenarios
+│   ├── DemoCenter.jsx           # Pre-built demo scenarios
 │   └── AuditLogs.jsx            # Filterable forensic event log
 │
 ├── 📄 ARCHITECTURE.md           # Full technical deep-dive
-├── 📄 DEMO_SCRIPT.md            # Hackathon judge presentation script
+├── 📄 DEMO_SCRIPT.md            # Judge presentation script
 ├── 🪟 start.bat                 # One-click launcher (Windows)
 └── 🐧 start.sh                  # One-click launcher (macOS / Linux)
 ```
 
 ---
 
-## 🧰 Tech Stack
+## 📊 Dashboard Pages
 
-| Layer | Technology | Purpose |
-|-------|-----------|---------|
-| **Backend** | FastAPI + Python 3.13 | Async gateway · security engine · REST API |
-| **Auth** | python-jose HS256 | Environment-keyed agent JWTs + single-use execution grants |
-| **Database** | SQLite + SQLAlchemy 2.0 | Atomic grant consumption · policy store · audit trail |
-| **Frontend** | React 18 + Vite + Tailwind CSS | Real-time security operations dashboard |
-| **Real-time** | Native WebSockets | Sub-50ms live feed for every security event |
-| **AI Agent** | Deterministic parser (Layer 1) + Gemini 1.5 Flash (Layer 2) | Natural-language tool calls routed through gateway |
+| Page | What It Shows |
+|------|--------------|
+| 🏠 **Dashboard** | Live SOC view — total actions, block rate, WebSocket event feed |
+| 🤖 **Agents** | Register, kill, suspend, and reactivate agents |
+| 💬 **Agent Chat** | Natural-language interface — see ALLOW / BLOCK / REVIEW in real time |
+| ⚔️ **Attack Lab** | Run all 8 adversarial attacks and inspect gateway interception |
+| ✅ **Approvals** | Human review queue — approve or reject REVIEW decisions |
+| 📋 **Audit Logs** | Filterable forensic event log with agent identity and risk scores |
+| 🎬 **Demo Center** | Pre-built walkthrough scenarios for judges |
 
 ---
 
-## 📊 Dashboard Pages
+## 🔮 Future Scope
 
-| Page | Purpose |
-|------|---------|
-| 🏠 **Dashboard** | Live SOC view — total actions, block rate, WebSocket feed |
-| 🤖 **Agents** | Register, kill, suspend, reactivate agents |
-| 💬 **Agent Chat** | Natural-language interface — see ALLOW/BLOCK/REVIEW in real time |
-| ⚔️ **Attack Lab** | Run all 8 adversarial attacks and inspect results |
-| ✅ **Approvals** | Human-in-the-loop queue — approve or reject REVIEW decisions |
-| 📋 **Audit Logs** | Filterable forensic event log with agent identity |
-| 🎬 **Demo Center** | Pre-built walkthrough scenarios for judges |
+- **Gemini 1.5 Flash Integration** — Layer 2 LLM function calling wired through gateway (Nov 21 live sprint)
+- **Distributed deployment** — Replace SQLite with PostgreSQL for multi-replica atomic grant consumption
+- **Policy editor UI** — Visual interface to configure per-agent permission manifests
+- **Alert webhooks** — Push BLOCK events to Slack / PagerDuty in real time
+- **Multi-modal context scanning** — Extend injection detection to image-embedded instructions
 
 ---
 
@@ -271,5 +355,9 @@ MIT — AgentShield is a demonstration of zero-trust execution enforcement infra
 ---
 
 <div align="center">
-  Built for <strong>GeNarrative Clash 2026</strong> · Open Innovation Track
+
+Built for **GeNarrative Clash 2026** · Open Innovation Track
+
+**Team Ease It Out** — Abhishek Gupta · MD Ibrahim · Sanchita Pandey · Saquib Rabban
+
 </div>
