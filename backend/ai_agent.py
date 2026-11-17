@@ -92,7 +92,7 @@ def _parse_intent(message: str) -> dict:
             }
 
     # ── Email read detection ──────────────────────────────────────────────────
-    if any(w in msg for w in ["read email", "check email", "show email", "inbox", "read my email"]):
+    if any(w in msg for w in ["read email", "check email", "show email", "inbox", "read my email", "latest email", "my emails", "new emails"]):
         return {
             "tool": "email_read",
             "params": {"count": 5},
