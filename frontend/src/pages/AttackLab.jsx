@@ -67,6 +67,12 @@ function ResultRow({ result, index }) {
         <InterceptBadge intercepted={intercepted} />
       </td>
       <td className="px-3 py-2.5">
+        {result.executor_invoked
+          ? <span className="text-red-400 font-bold text-xs">⚠️ INVOKED</span>
+          : <span className="text-green-400 text-xs font-mono">0 calls</span>
+        }
+      </td>
+      <td className="px-3 py-2.5">
         <span className={`text-sm font-bold font-mono ${result.risk_score >= 70 ? 'text-red-400' : result.risk_score >= 40 ? 'text-orange-400' : 'text-green-400'}`}>
           {result.risk_score}
         </span>
@@ -154,6 +160,7 @@ export default function AttackLab() {
             <span className="text-green-400">Intercepted: <span className="font-bold">{summary.intercepted}</span></span>
             <span className="text-red-400">Bypassed: <span className="font-bold">{summary.total - summary.intercepted}</span></span>
             <span className="text-gray-400">Avg Risk: <span className="text-orange-400 font-bold">{summary.avg_risk_score?.toFixed(1)}</span></span>
+            <span className="text-cyan-400">Executor invoked on attacks: <span className="font-bold">{summary.executor_invoked_count ?? 0}</span> (should be 0)</span>
           </div>
         </div>
       )}

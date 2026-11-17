@@ -1,19 +1,12 @@
 """
 AgentShield — Execution Enforcement Gateway
 ============================================
-This is what turns AgentShield from an "advisor" into an actual firewall.
+Two-stage cryptographic execution model:
+  1. POST /api/gateway/authorize → security engine evaluates; ALLOW issues grant_token + persists ExecutionGrant row
+  2. POST /api/gateway/execute   → atomic consume of grant (consumed_at set in single UPDATE WHERE consumed_at IS NULL)
+     → only then does protected executor run
 
-The agent NEVER calls the protected service directly.
-Only this gateway holds the execution credentials.
-Flow:
-  1. Agent calls POST /api/gateway/authorize → receives short-lived grant_token
-  2. Agent calls POST /api/gateway/execute with grant_token → gateway executes
-  3. Grant tokens expire in 2 minutes and cannot be reused (replay-prevented)
-
-This enforces that:
-  - Blocked actions CANNOT be executed (agent has no direct access)
-  - Execution requires a fresh cryptographic grant per action
-  - All execution is logged atomically before it happens
+Replay prevention is database-backed and multi-worker safe.
 """
 
 import json
@@ -22,6 +15,7 @@ import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from sqlalchemy import update
 from jose import JWTError
 from typing import Any, Dict, Optional
 
@@ -31,10 +25,6 @@ import security_engine
 from database import get_db
 
 router = APIRouter(prefix="/api/gateway", tags=["execution-gateway"])
-
-# Track used grant tokens to prevent replay attacks (in-memory for hackathon)
-# Production: use Redis with TTL
-_used_grants: set = set()
 
 
 # ── Schemas ────────────────────────────────────────────────────────────────────
@@ -56,18 +46,16 @@ class AuthorizeResponse(BaseModel):
     risk_score: int
     reason: str
     action_id: str
-    grant_token: Optional[str] = None  # only present when decision == ALLOW
+    grant_token: Optional[str] = None
     message: str
 
 
-# ── Mock Protected Service Executors ───────────────────────────────────────────
-# In production, these would call real external APIs using
-# credentials that ONLY this gateway possesses.
+# ── Executor Allowlist (explicit — unknown actions are REJECTED) ───────────────
 
 def _execute_transfer(params: dict) -> dict:
     tx_id = f"TXN-{uuid.uuid4().hex[:8].upper()}"
     return {
-        "service": "Protected Banking Gateway",
+        "service": "Simulated Banking Gateway",
         "transaction_id": tx_id,
         "amount": f"₹{params.get('amount', 0):,.2f}",
         "recipient": params.get("recipient"),
@@ -78,7 +66,7 @@ def _execute_transfer(params: dict) -> dict:
 
 def _execute_email_read(params: dict) -> dict:
     return {
-        "service": "Protected Email Service",
+        "service": "Simulated Email Service",
         "emails": [
             {"id": "msg_001", "from": "billing@electricity.gov", "subject": "Bill Due: ₹2,500"},
             {"id": "msg_002", "from": "hr@company.com", "subject": "Monthly Payslip"},
@@ -89,7 +77,7 @@ def _execute_email_read(params: dict) -> dict:
 
 def _execute_file(params: dict) -> dict:
     return {
-        "service": "Protected File System",
+        "service": "Simulated File System",
         "path": params.get("path"),
         "content": "File contents retrieved securely via AgentShield gateway.",
         "bytes_read": 128,
@@ -98,7 +86,7 @@ def _execute_file(params: dict) -> dict:
 
 def _execute_calendar(params: dict) -> dict:
     return {
-        "service": "Protected Calendar Service",
+        "service": "Simulated Calendar Service",
         "event_id": f"EVT-{uuid.uuid4().hex[:6].upper()}",
         "title": params.get("title"),
         "scheduled": params.get("date", "Tomorrow 10:00 AM"),
@@ -106,7 +94,8 @@ def _execute_calendar(params: dict) -> dict:
     }
 
 
-EXECUTORS = {
+# Explicit allowlist: any action_type not in this dict is REJECTED
+EXECUTORS: Dict[str, Any] = {
     "transfer_money": _execute_transfer,
     "email_read": _execute_email_read,
     "file_access": _execute_file,
@@ -114,15 +103,34 @@ EXECUTORS = {
 }
 
 
+# ── Helper: atomic grant consumption ──────────────────────────────────────────
+
+def _consume_grant_atomic(db: Session, jti: str) -> bool:
+    """
+    Atomically consume an execution grant by setting consumed_at.
+    Returns True if this call consumed it (first use), False if already used.
+    Uses UPDATE WHERE consumed_at IS NULL — safe across multiple workers.
+    """
+    now = datetime.datetime.utcnow()
+    result = db.execute(
+        update(models.ExecutionGrant)
+        .where(
+            models.ExecutionGrant.jti == jti,
+            models.ExecutionGrant.consumed_at.is_(None),
+            models.ExecutionGrant.expires_at > now,
+        )
+        .values(consumed_at=now)
+    )
+    db.commit()
+    return result.rowcount == 1
+
+
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
 @router.post("/authorize", response_model=AuthorizeResponse)
 async def gateway_authorize(payload: AuthorizeRequest, db: Session = Depends(get_db)):
     """
-    Step 1: Agent submits proposed action for authorization.
-    If ALLOW: returns a short-lived single-use grant_token for execution.
-    If REVIEW: creates human approval record; no grant issued.
-    If BLOCK: rejected immediately; no grant issued.
+    Step 1: Evaluate proposed action. If ALLOW, mint & persist a single-use ExecutionGrant.
     """
     decision, risk_score, reason, action_id = security_engine.authorize_action(
         db=db,
@@ -134,12 +142,29 @@ async def gateway_authorize(payload: AuthorizeRequest, db: Session = Depends(get
 
     grant_token = None
     if decision == "ALLOW":
-        # Retrieve agent_id from token to issue the grant
         try:
             agent_id = auth.verify_token(payload.token)
         except JWTError:
             raise HTTPException(status_code=401, detail="Invalid token")
-        grant_token = auth.create_execution_grant(action_id, payload.action_type, agent_id)
+
+        # Reject unsupported action types even on ALLOW
+        if payload.action_type not in EXECUTORS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Action type '{payload.action_type}' has no registered executor — rejected"
+            )
+
+        grant_token, jti = auth.create_execution_grant(action_id, payload.action_type, agent_id)
+
+        # Persist grant to DB (atomic replay prevention)
+        grant_row = models.ExecutionGrant(
+            action_id=action_id,
+            jti=jti,
+            expires_at=datetime.datetime.utcnow() + datetime.timedelta(minutes=2),
+        )
+        db.add(grant_row)
+        db.commit()
+
         message = "Action authorized. Use the grant_token to execute within 2 minutes."
     elif decision == "REVIEW":
         message = "Action requires human approval. Check the Approval Center."
@@ -159,54 +184,48 @@ async def gateway_authorize(payload: AuthorizeRequest, db: Session = Depends(get
 @router.post("/execute")
 async def gateway_execute(payload: ExecuteRequest, db: Session = Depends(get_db)):
     """
-    Step 2: Agent submits grant_token to actually execute an ALLOW'd action.
-    - Verifies the grant is valid, unexpired, and matches action_id
-    - Prevents replay: each grant can only be used once
-    - Executes the tool on the agent's behalf (agent never touches the service)
-    - Marks action as executed in DB
+    Step 2: Atomically consume grant and execute the tool.
+    - DB-backed replay prevention (multi-worker safe)
+    - Executor allowlist enforced
+    - Protected service only called after atomic grant consumption
     """
-    # Replay prevention: reject already-used grants
-    grant_fingerprint = payload.grant_token[-16:]  # last 16 chars as fingerprint
-    if grant_fingerprint in _used_grants:
-        raise HTTPException(status_code=409, detail="Grant token already used — replay attack prevented")
-
-    # Verify the grant
+    # Verify JWT signature and extract jti
     try:
-        agent_id = auth.verify_execution_grant(payload.grant_token, payload.action_id)
+        agent_id, jti = auth.verify_execution_grant(payload.grant_token, payload.action_id)
     except JWTError as e:
         raise HTTPException(status_code=403, detail=f"Invalid or expired execution grant: {e}")
 
-    # Fetch the action from DB and verify it was ALLOW'd
+    # Atomic grant consumption — prevents replay under concurrent requests
+    consumed = _consume_grant_atomic(db, jti)
+    if not consumed:
+        raise HTTPException(status_code=409, detail="Grant already used or expired — replay attack prevented")
+
+    # Fetch and validate action
     action = db.query(models.Action).filter(models.Action.id == payload.action_id).first()
     if not action:
         raise HTTPException(status_code=404, detail="Action record not found")
     if action.decision != "ALLOW":
-        raise HTTPException(
-            status_code=403,
-            detail=f"Action was {action.decision}, not ALLOW — execution refused"
-        )
+        raise HTTPException(status_code=403, detail=f"Action was {action.decision}, not ALLOW — execution refused")
     if action.executed:
-        raise HTTPException(status_code=409, detail="Action already executed — replay prevented")
+        raise HTTPException(status_code=409, detail="Action already executed")
 
-    # Mark grant as used (replay prevention)
-    _used_grants.add(grant_fingerprint)
-    # Prune set to prevent unbounded growth
-    if len(_used_grants) > 10000:
-        _used_grants.clear()
-
-    # Execute the tool (only gateway has service credentials)
-    params = json.loads(action.params_json or "{}")
+    # Executor allowlist — reject unknown action types
     executor = EXECUTORS.get(action.action_type)
     if not executor:
-        result = {"service": "AgentShield Gateway", "status": "executed", "action_type": action.action_type}
-    else:
-        result = executor(params)
+        raise HTTPException(
+            status_code=400,
+            detail=f"No registered executor for action type '{action.action_type}'"
+        )
 
-    # Mark action as executed
+    # Execute via gateway (protected service credentials stay here, not with agent)
+    params = json.loads(action.params_json or "{}")
+    result = executor(params)
+
+    # Mark executed atomically
     action.executed = True
     db.commit()
 
-    # Audit log
+    # Audit
     log = models.AuditLog(
         agent_id=agent_id,
         event_type="ACTION_EXECUTED",
@@ -229,6 +248,41 @@ async def gateway_execute(payload: ExecuteRequest, db: Session = Depends(get_db)
     }
 
 
+@router.post("/execute-approved")
+async def execute_approved_action(payload: dict, db: Session = Depends(get_db)):
+    """
+    Called internally after a human approves a REVIEW action.
+    Triggers the real executor for the approved action.
+    """
+    action_id = payload.get("action_id")
+    action = db.query(models.Action).filter(models.Action.id == action_id).first()
+    if not action or action.decision != "REVIEW":
+        raise HTTPException(status_code=404, detail="Approved action not found")
+
+    executor = EXECUTORS.get(action.action_type)
+    if not executor:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No registered executor for '{action.action_type}'"
+        )
+
+    params = json.loads(action.params_json or "{}")
+    result = executor(params)
+
+    action.executed = True
+    db.commit()
+
+    log = models.AuditLog(
+        agent_id=action.agent_id,
+        event_type="APPROVAL_EXECUTED",
+        details_json=json.dumps({"action_id": action_id, "result": result}),
+    )
+    db.add(log)
+    db.commit()
+
+    return result
+
+
 @router.get("/status/{action_id}")
 def gateway_status(action_id: str, db: Session = Depends(get_db)):
     """Check the execution status of a specific action."""
@@ -242,4 +296,3 @@ def gateway_status(action_id: str, db: Session = Depends(get_db)):
         "risk_score": action.risk_score,
         "reason": action.reason,
     }
-

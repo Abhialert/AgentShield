@@ -16,7 +16,20 @@ class AgentOut(BaseModel):
     status: str
     created_at: datetime
     permissions_json: str
-    token: Optional[str] = None
+    # token intentionally omitted — never expose bearer tokens in list responses
+
+    class Config:
+        from_attributes = True
+
+
+class AgentCreatedOut(BaseModel):
+    """Returned only on agent creation — includes the token once."""
+    id: str
+    name: str
+    status: str
+    created_at: datetime
+    permissions_json: str
+    token: str   # Only shown at creation time; not retrievable afterwards
 
     class Config:
         from_attributes = True

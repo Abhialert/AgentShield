@@ -11,7 +11,7 @@ from database import get_db
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
 
-@router.post("", response_model=schemas.AgentOut)
+@router.post("", response_model=schemas.AgentCreatedOut)
 def create_agent(payload: schemas.AgentCreate, db: Session = Depends(get_db)):
     existing = db.query(models.Agent).filter(models.Agent.name == payload.name).first()
     if existing:
@@ -27,11 +27,12 @@ def create_agent(payload: schemas.AgentCreate, db: Session = Depends(get_db)):
     db.refresh(agent)
 
     token = auth.create_agent_token(agent.id, payload.permissions)
+    # Store raw token (internal use by gateway/attack-lab) and its hash
     agent.token = token
+    agent.token_hash = auth.hash_token(token)
     db.commit()
     db.refresh(agent)
 
-    # Audit log
     log = models.AuditLog(
         agent_id=agent.id,
         event_type="AGENT_CREATED",
@@ -40,11 +41,20 @@ def create_agent(payload: schemas.AgentCreate, db: Session = Depends(get_db)):
     db.add(log)
     db.commit()
 
-    return agent
+    # Return token ONCE in creation response — caller must save it
+    return schemas.AgentCreatedOut(
+        id=agent.id,
+        name=agent.name,
+        status=agent.status,
+        created_at=agent.created_at,
+        permissions_json=agent.permissions_json,
+        token=token,
+    )
 
 
 @router.get("", response_model=List[schemas.AgentOut])
 def list_agents(db: Session = Depends(get_db)):
+    """List agents — tokens are NOT returned."""
     return db.query(models.Agent).order_by(models.Agent.created_at.desc()).all()
 
 
@@ -57,7 +67,6 @@ def kill_agent(agent_id: str, db: Session = Depends(get_db)):
     agent.status = "suspended"
     db.commit()
 
-    # Invalidate all pending approvals for this agent's actions
     pending_approvals = (
         db.query(models.Approval)
         .join(models.Action, models.Approval.action_id == models.Action.id)

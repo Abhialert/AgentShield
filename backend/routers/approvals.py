@@ -1,3 +1,8 @@
+"""
+AgentShield — Approvals Router
+Human-in-the-loop approval workflow.
+Approving an action now triggers the real executor via the gateway.
+"""
 import json
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
@@ -7,6 +12,7 @@ from typing import List
 import models
 import schemas
 from database import get_db
+from routers.gateway import EXECUTORS
 
 router = APIRouter(prefix="/api/approvals", tags=["approvals"])
 
@@ -54,22 +60,40 @@ def approve_action(action_id: str, db: Session = Depends(get_db)):
     if approval.status != "pending":
         raise HTTPException(status_code=400, detail=f"Approval is already {approval.status}")
 
+    action = db.query(models.Action).filter(models.Action.id == action_id).first()
+    if not action:
+        raise HTTPException(status_code=404, detail="Action record not found")
+
+    # Invoke the real executor — only mark executed after success
+    executor = EXECUTORS.get(action.action_type)
+    execution_result = None
+    if executor:
+        params = json.loads(action.params_json or "{}")
+        execution_result = executor(params)
+        action.executed = True
+    else:
+        # No registered executor: approve the record but flag as not executed
+        execution_result = {
+            "warning": f"No executor registered for '{action.action_type}'. Approval recorded but action not executed."
+        }
+
     approval.status = "approved"
     approval.resolved_at = datetime.utcnow()
+    approval.execution_result = json.dumps(execution_result)
     db.commit()
 
-    # Mark the action as executed
-    action = db.query(models.Action).filter(models.Action.id == action_id).first()
-    if action:
-        action.executed = True
-        db.commit()
-        log = models.AuditLog(
-            agent_id=action.agent_id,
-            event_type="APPROVAL_APPROVED",
-            details_json=json.dumps({"action_id": action_id, "action_type": action.action_type}),
-        )
-        db.add(log)
-        db.commit()
+    log = models.AuditLog(
+        agent_id=action.agent_id,
+        event_type="APPROVAL_APPROVED",
+        details_json=json.dumps({
+            "action_id": action_id,
+            "action_type": action.action_type,
+            "executed": action.executed,
+            "result": execution_result,
+        }),
+    )
+    db.add(log)
+    db.commit()
 
     db.refresh(approval)
     return approval

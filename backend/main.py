@@ -125,6 +125,7 @@ def seed_agents(db: Session):
 
         token = auth.create_agent_token(agent.id, data["permissions"])
         agent.token = token
+        agent.token_hash = auth.hash_token(token)
         db.commit()
 
         for pol in data["policies"]:

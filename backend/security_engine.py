@@ -178,8 +178,10 @@ def authorize_action(
         # ── 3. Prompt injection scan (encoding-aware) ─────────────────────────
         injection_hits = _detect_injection(context or "")
         if injection_hits:
-            risk_score += 10
-            reasons.append(f"Prompt injection detected: {', '.join(set(injection_hits))}")
+            # Zero-trust: injection = agent may be compromised; hard block regardless of params.
+            hard_block = True
+            risk_score = 100
+            reasons.append(f"Prompt injection hard-blocked: {', '.join(set(injection_hits))}")
 
         # ── 4. Action permission check ────────────────────────────────────────
         try:
